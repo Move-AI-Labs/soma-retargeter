@@ -3,7 +3,7 @@
 
 ![SOMA Retargeter Banner](assets/docs/banner.gif)
 
-Convert [SOMA](https://github.com/NVlabs/SOMA-X) human motion captures into humanoid robot joint animation. Takes BVH motion files as input and produces robot-playable CSV joint data as output using GPU-optimized inverse kinematics via [Newton](https://github.com/newton-physics/newton) and high-performance computation with [NVIDIA Warp](https://github.com/NVIDIA/warp).
+Convert [SOMA](https://github.com/NVlabs/SOMA-X) human motion captures into humanoid robot joint animation. Takes BVH motion files or SOMA parameter NPZ files as input and produces robot-playable CSV joint data as output using GPU-optimized inverse kinematics via [Newton](https://github.com/newton-physics/newton) and high-performance computation with [NVIDIA Warp](https://github.com/NVIDIA/warp).
 
 The retargeting pipeline handles proportional human-to-robot scaling, multi-objective IK solving with joint limits, feet stabilization to maintain ground contact, and per-DOF joint limit clamping. Currently supports SOMA as the input skeleton and Unitree G1 (29 DOF) as the output robot. Additional robot targets are planned.
 
@@ -81,6 +81,19 @@ sudo apt-get install python3.12-tk
 
 This repo includes 10 sample BVH/CSV pairs in `assets/motions/` for immediate testing.
 
+### Supported motion input formats
+
+- `.bvh`: standard SOMA skeleton motion files.
+- `.npz`: GEM-style SOMA per-frame parameter files with:
+  - schema A keys: `global_orient`, `body_pose`, `transl`
+  - schema B keys: `poses`, `transl` (plus optional `joint_names`/`joint_orient`)
+  - optional key: `fps` (defaults to `30.0` if missing)
+  - accepted shapes:
+    - `global_orient`: `(L, 3)`
+    - `body_pose`: `(L, 228)` or `(L, 76, 3)`
+    - `poses`: `(L, 77, 3)`
+    - `transl`: `(L, 3)`
+
 For large-scale motion data, see the [SEED dataset](https://huggingface.co/datasets/bones-studio/seed) (Skeletal Everyday Embodiment Dataset) published by [Bones Studio](https://huggingface.co/bones-studio). SEED provides a large-scale collection of human motions on the SOMA uniform-proportion skeleton, which is the expected input format for this tool. The G1 robot motion data included in SEED was retargeted using SOMA Retargeter.
 
 ## Quick Start
@@ -95,17 +108,17 @@ python ./app/bvh_to_csv_converter.py --config ./assets/default_bvh_to_csv_conver
 
 ![Interactive viewer interface](assets/docs/interactive-viewer-screenshot.png)
 
-The viewer displays the source SOMA motion alongside the retargeted robot in a 3D viewport. Use the right panel to load BVH files, run retargeting, and save CSV output. Playback controls at the bottom allow scrubbing, speed adjustment, and looping. Toggle visibility of the skinned mesh, skeleton, joint axes, and positioning gizmos.
+The viewer displays the source SOMA motion alongside the retargeted robot in a 3D viewport. Use the right panel to load motion files (`.bvh` or `.npz`), run retargeting, and save CSV output. Playback controls at the bottom allow scrubbing, speed adjustment, and looping. Toggle visibility of the skinned mesh, skeleton, joint axes, and positioning gizmos.
 
 ### Batch conversion (headless)
 
-Process a folder of BVH files without a display. Set `import_folder` and `export_folder` in the config file, then run:
+Process a folder of motion files without a display. Set `import_folder` and `export_folder` in the config file, then run:
 
 ```bash
 python ./app/bvh_to_csv_converter.py --config ./assets/default_bvh_to_csv_converter_config.json --viewer null
 ```
 
-Batch mode recursively finds all `.bvh` files in the import folder, processes them in configurable batch sizes, and writes CSV files to the export folder mirroring the input directory structure.
+Batch mode recursively finds all `.bvh` and `.npz` files in the import folder, processes them in configurable batch sizes, and writes CSV files to the export folder mirroring the input directory structure. NPZ inputs are exported as `*_from_npz.csv` (specifically `__from_npz`) to avoid basename collisions with BVH outputs.
 
 ## Code Overview
 
@@ -120,7 +133,7 @@ Batch mode recursively finds all `.bvh` files in the import folder, processes th
 | Module | Description |
 |--------|-------------|
 | `animation/` | Core data structures for skeletons, animation buffers, IK, and skinned meshes. |
-| `assets/` | File I/O for BVH, CSV, and USD formats. |
+| `assets/` | File I/O for BVH, SOMA NPZ params, CSV, and USD formats. |
 | `pipelines/` | Retargeting pipeline: IK solving, feet stabilization, and joint limit clamping. |
 | `robotics/` | Human-to-robot scaling and robot output formatting. |
 | `renderers/` | Visualization for the interactive viewer. |

@@ -10,6 +10,7 @@ import warp as wp
 
 import soma_retargeter.utils.math_utils as math_utils
 import soma_retargeter.assets.bvh as bvh_utils
+import soma_retargeter.assets.soma_npz as soma_npz_utils
 import soma_retargeter.assets.csv as csv_utils
 import soma_retargeter.utils.io_utils as io_utils
 import soma_retargeter.pipelines.utils as pipeline_utils
@@ -26,6 +27,7 @@ _UI_NEWTON_PANEL_WIDTH  = 320
 _UI_NEWTON_PANEL_MARGIN = 10
 _UI_NEWTON_PANEL_ALPHA  = 0.9
 _DEFAULT_COLOR = (235.0 / 255.0, 245.0 / 255.0, 112.0 / 255.0)
+_SUPPORTED_MOTION_EXTENSIONS = (".bvh", ".npz")
 
 class Viewer:
     def __init__(self, viewer, config):
@@ -60,7 +62,7 @@ class Viewer:
         self.show_skeleton_joint_axes = False
         self.show_gizmos = True
 
-        self.viewer.renderer.set_title("BVH to CSV Converter")
+        self.viewer.renderer.set_title("Motion to CSV Converter")
         self.viewer.register_ui_callback(lambda ui: self.gui(ui), position="free")
 
         g1_builder = newton.ModelBuilder()
@@ -101,7 +103,26 @@ class Viewer:
         self.robot_csv_animation_buffers[0] = csv_utils.load_csv(path)
         self.compute_playback_total_time()
 
-    def load_bvh_file(self, path):
+    def load_motion_file(self, path, input_skeleton=None):
+        ext = pathlib.Path(path).suffix.lower()
+        if ext == ".bvh":
+            return bvh_utils.load_bvh(path, input_skeleton)
+        if ext == ".npz":
+            return soma_npz_utils.load_soma_npz(path, input_skeleton)
+
+        raise ValueError(
+            f"[ERROR]: Unsupported motion file extension [{ext}] for [{path}]. "
+            f"Supported extensions are {_SUPPORTED_MOTION_EXTENSIONS}."
+        )
+
+    def _csv_output_path_for_motion(self, import_path: pathlib.Path, export_path: pathlib.Path, file_path: pathlib.Path):
+        rel_path = file_path.relative_to(import_path)
+        if rel_path.suffix.lower() == ".npz":
+            return export_path / rel_path.with_name(f"{rel_path.stem}__from_npz.csv")
+
+        return export_path / rel_path.with_suffix(".csv")
+
+    def load_motion_for_viewer(self, path):
         self.animation_buffers = []
         self.skeleton_instances = []
         if self.skeleton_renderer is not None:
@@ -111,7 +132,7 @@ class Viewer:
         if self.coordinate_renderer is not None:
             self.coordinate_renderer.clear(self.viewer)
 
-        self.skeleton, animation = bvh_utils.load_bvh(path)
+        self.skeleton, animation = self.load_motion_file(path)
         self.skeleton_renderer = SkeletonRenderer(self.skeleton, [0])
         self.skeleton_instances = [SkeletonInstance(self.skeleton, _DEFAULT_COLOR, self.converter.transform(wp.transform_identity()))]
         self.animation_offsets = [wp.transform_identity()] * len(self.skeleton_instances)
@@ -264,20 +285,20 @@ class Viewer:
         if ui.collapsing_header("Motion", flags=ui.TreeNodeFlags_.default_open):
             ui.separator()
             ui.align_text_to_frame_padding()
-            ui.text("BVH Motion:")
+            ui.text("Motion File:")
             ui.same_line()
             
             ui.push_id(100)
             if ui.button("Load"):
                 root = tk.Tk()
                 root.withdraw()
-                bvh_path = tk_filedialog.askopenfilename(
-                    title='Load BVH File',
+                motion_path = tk_filedialog.askopenfilename(
+                    title='Load Motion File',
                     defaultextension=".bvh",
-                    filetypes=[('BVH files', '*.bvh')])
+                    filetypes=[('Motion files', '*.bvh *.npz'), ('BVH files', '*.bvh'), ('NPZ files', '*.npz')])
 
-                if bvh_path:
-                    self.load_bvh_file(bvh_path)
+                if motion_path:
+                    self.load_motion_for_viewer(motion_path)
             ui.pop_id()
 
             if (len(self.animation_buffers) == 0):
@@ -409,21 +430,26 @@ class Viewer:
             export_path.mkdir(parents=True, exist_ok=True)
 
         batch_size = self.config['batch_size']
-        bvh_files = list(import_path.rglob("*.bvh"))
-        if (len(bvh_files) == 0):
-            print(f"[ERROR]: Import folder {str(import_path)}, does not contain any BVH files.")
+        motion_files = []
+        for ext in _SUPPORTED_MOTION_EXTENSIONS:
+            motion_files.extend(import_path.rglob(f"*{ext}"))
+
+        if (len(motion_files) == 0):
+            print(
+                f"[ERROR]: Import folder {str(import_path)} does not contain any supported motion files "
+                f"{_SUPPORTED_MOTION_EXTENSIONS}."
+            )
             exit(-1)
 
         # Sort files based on size (largest first)
-        bvh_files.sort(key=lambda p: p.stat().st_size, reverse=True)
-        batches = [bvh_files[i:i + batch_size] for i in range(0, len(bvh_files), batch_size)]
+        motion_files.sort(key=lambda p: p.stat().st_size, reverse=True)
+        batches = [motion_files[i:i + batch_size] for i in range(0, len(motion_files), batch_size)]
         
         # All skeletons should be the same, load one as our reference
-        bvh_importer = bvh_utils.BVHImporter()
-        bvh_skeleton, _ = bvh_importer.create_skeleton(batches[0][0])
+        reference_skeleton, _ = self.load_motion_file(str(batches[0][0]))
 
         bvh_tx_converter = self.converter.transform(wp.transform_identity())
-        expected_num_joints = bvh_skeleton.num_joints
+        expected_num_joints = reference_skeleton.num_joints
 
         retarget_source = self.config['retarget_source']
         retarget_solver = self.config['retargeter']
@@ -431,7 +457,7 @@ class Viewer:
         retarget_pipeline = None
         if (retarget_solver == 'Newton'):
             import soma_retargeter.pipelines.newton_pipeline as newton_pipeline
-            retarget_pipeline = newton_pipeline.NewtonPipeline(bvh_skeleton, retarget_source, retarget_target)
+            retarget_pipeline = newton_pipeline.NewtonPipeline(reference_skeleton, retarget_source, retarget_target)
         if retarget_pipeline is None:
             print(f"[ERROR]: Invalid retarget solver selected [{retarget_solver}]. Use 'Newton'.")
             exit(-1)
@@ -445,7 +471,7 @@ class Viewer:
             print(f"[INFO]: Loading {len(batch)} animations...")
             animations = []
             for file_path in batch:
-                _, animation = bvh_utils.load_bvh(file_path, bvh_skeleton)
+                _, animation = self.load_motion_file(str(file_path), reference_skeleton)
                 # All animations should be on the same skeleton
                 assert expected_num_joints == animation.skeleton.num_joints, (
                     f"[ERROR]: Unexpected number of joints in input motion. Expected {expected_num_joints}, "
@@ -461,9 +487,9 @@ class Viewer:
                 csv_buffers = retarget_pipeline.execute()
 
                 assert(len(csv_buffers) == len(animations))
-                for i in trange(len(csv_buffers), desc="[INFO]: Exporting CSV Files"):
-                    csv_buffer = csv_buffers[i]
-                    dst_path = export_path / pathlib.Path(batch[i]).relative_to(import_path).with_suffix(".csv")
+                for buffer_idx in trange(len(csv_buffers), desc="[INFO]: Exporting CSV Files"):
+                    csv_buffer = csv_buffers[buffer_idx]
+                    dst_path = self._csv_output_path_for_motion(import_path, export_path, pathlib.Path(batch[buffer_idx]))
                     dst_path.parent.mkdir(parents=True, exist_ok=True)
                     csv_utils.save_csv(dst_path, csv_buffer)
 
